@@ -63,8 +63,27 @@ module Isuketch
           FROM `strokes`
           WHERE `room_id` = ?
             AND `id` > ?
-          ORDER BY `id` ASC;
+          ORDER BY `id` ASC
         |, [room_id, greater_than_id])
+      end
+
+      def get_strokes_with_points(dbh, room_id, greater_than_id)
+        select_all(dbh, %|
+          SELECT `id`, `room_id`, `width`, `red`, `green`, `blue`, `alpha`, `created_at`
+          FROM `strokes`
+          WHERE `room_id` = ?
+            AND `id` > ?
+          ORDER BY `id` ASC
+        |, [room_id, greater_than_id])
+      end
+
+      def get_all_strokes(dbh, room_id)
+        select_all(dbh, %|
+          SELECT `id`, `room_id`, `width`, `red`, `green`, `blue`, `alpha`, `created_at`
+          FROM `strokes`
+          WHERE `room_id` = ?
+          ORDER BY `id` ASC
+        |, [room_id])
       end
 
       def to_room_json(room)
@@ -169,18 +188,22 @@ module Isuketch
 
     get '/api/rooms' do
       dbh = get_dbh
-      results = select_all(dbh, %|
-        SELECT `room_id`, MAX(`id`) AS `max_id`
-        FROM `strokes`
-        GROUP BY `room_id`
-        ORDER BY `max_id` DESC
-        LIMIT 100
-      |, [])
+
+      query = <<SQL
+SELECT s.room_id, MAX(s.id) AS max_id, r.*,
+COUNT(room_id = s.room_id OR NULL) AS stroke_count
+FROM strokes AS s
+LEFT JOIN rooms AS r ON r.id = room_id
+GROUP BY room_id
+ORDER BY max_id DESC
+LIMIT 100;
+SQL
+      results = select_all(dbh, query, [])
 
       rooms = results.map {|res|
-        room = get_room(dbh, res[:room_id])
-        room[:stroke_count] = get_strokes(dbh, room[:id], 0).size
-        room
+	room = res
+	room[:id] = room[:room_id]
+	room
       }
 
       content_type :json
@@ -253,7 +276,14 @@ module Isuketch
         ))
       end
 
-      strokes = get_strokes(dbh, room[:id], 0)
+      query = <<SQL
+SELECT id, room_id, width, red, green, blue, alpha, created_at
+FROM strokes
+WHERE room_id = ?
+AND id > 0
+ORDER BY id ASC;
+SQL
+      strokes = get_all_strokes(dbh, room[:id])
       strokes.each do |stroke|
         stroke[:points] = get_stroke_points(dbh, stroke[:id])
       end
@@ -291,7 +321,7 @@ module Isuketch
         ))
       end
 
-      stroke_count = get_strokes(dbh, room[:id], 0).count
+      stroke_count = get_all_strokes(dbh, room[:id]).count
       if stroke_count == 0
         count = select_one(dbh, %|
           SELECT COUNT(*) as cnt FROM `room_owners`
@@ -383,9 +413,21 @@ module Isuketch
         5.downto(0) do |i|
           sleep 0.5
 
-          strokes = get_strokes(dbh, room[:id], last_stroke_id)
-          strokes.each do |stroke|
-            stroke[:points] = get_stroke_points(dbh, stroke[:id])
+	  query = <<SQL
+SELECT s.id, s.room_id, s.width, s.red, s.green, s.blue, s.alpha, s.created_at,
+p.id AS point_id, p.stroke_id, p.x, p.y
+FROM strokes AS s
+LEFT JOIN points AS p
+ON p.stroke_id = s.id
+WHERE s.room_id = ?
+AND s.id > ?
+ORDER BY s.id ASC
+SQL
+          strokes = select_all(dbh, query, [room[:id], last_stroke_id])
+          strokes.each.slice_when {|a,b| a[:stroke_id] != b[:stroke_id] }.each do |stroke|
+	    tmp = stroke
+	    stroke = stroke[0]
+	    stroke[:points] = tmp
             writer << ("id:#{stroke[:id]}\n\n" + "event:stroke\n" + "data:#{JSON.generate(to_stroke_json(stroke))}\n\n")
             last_stroke_id = stroke[:id]
           end
