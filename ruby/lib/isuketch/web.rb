@@ -3,10 +3,14 @@ require 'time'
 
 require 'mysql2'
 require 'sinatra/base'
+#require 'rack-lineprof'
+#require 'logger'
 
 module Isuketch
   class Web < ::Sinatra::Base
     JSON.load_default_options[:symbolize_names] = true
+    #logger = Logger.new('/tmp/lineprof.log')
+    #use Rack::Lineprof, profile: 'app.rb', logger: logger
 
     set :protection, except: [:json_csrf]
 
@@ -196,7 +200,7 @@ FROM strokes AS s
 LEFT JOIN rooms AS r ON r.id = room_id
 GROUP BY room_id
 ORDER BY max_id DESC
-LIMIT 100;
+LIMIT 100
 SQL
       results = select_all(dbh, query, [])
 
@@ -277,15 +281,19 @@ SQL
       end
 
       query = <<SQL
-SELECT id, room_id, width, red, green, blue, alpha, created_at
-FROM strokes
-WHERE room_id = ?
-AND id > 0
-ORDER BY id ASC;
+SELECT s.id, s.room_id, s.width, s.red, s.green, s.blue, s.alpha, s.created_at,
+p.id AS point_id, p.stroke_id, p.x, p.y
+FROM strokes AS s
+LEFT JOIN points AS p
+ON p.stroke_id = s.id
+WHERE s.room_id = ?
+ORDER BY s.id ASC
 SQL
-      strokes = get_all_strokes(dbh, room[:id])
-      strokes.each do |stroke|
-        stroke[:points] = get_stroke_points(dbh, stroke[:id])
+      strokes = select_all(dbh, query, [room[:id]])
+      strokes = strokes.slice_when {|a,b| a[:stroke_id] != b[:stroke_id] }.map do |points|
+	stroke = points[0].dup
+	stroke[:points] = points.map {|s| s[:id] = s[:point_id]; s }
+	stroke
       end
       room[:strokes] = strokes
       room[:watcher_count] = get_watcher_count(dbh, room[:id])
@@ -379,6 +387,18 @@ SQL
       JSON.generate(
         stroke: to_stroke_json(stroke)
       )
+    end
+
+    get '/api/rooms-last-modified/:id' do |id|
+      dbh = get_dbh
+      query = <<SQL
+SELECT created_at
+FROM strokes
+WHERE id = ?
+ORDER BY created_at DESC
+LIMIT 1
+SQL
+      select_one(dbh, query, [id]).to_json
     end
 
     get '/api/stream/rooms/:id', provides: 'text/event-stream' do |id|
